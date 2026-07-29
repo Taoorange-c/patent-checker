@@ -5,3 +5,4 @@ jieba
 sentence-transformers
 torch
 scikit-learn
+fpdf2

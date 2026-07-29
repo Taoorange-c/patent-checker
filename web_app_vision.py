@@ -5,6 +5,7 @@ import os
 import jieba.analyse
 from sentence_transformers import SentenceTransformer, util
 import warnings
+from fpdf import FPDF
 
 warnings.filterwarnings('ignore')
 
@@ -73,22 +74,115 @@ def analyze_patents_and_draft(draft_text, target_folder):
     return global_keywords, df_combined.sort_values(by='与设想相似度(%)', ascending=False)[result_cols]
 
 # ==========================================
-# 4. 网页交互界面
+# 4. 视觉优化版：PDF 报告生成函数
+# ==========================================
+def generate_pdf_report(project_name, global_keys, df_result, high_risk, mid_risk):
+    pdf = FPDF()
+    pdf.add_page()
+
+    try:
+        pdf.add_font('Hei', '', 'simhei.ttf', uni=True)
+        pdf.set_font('Hei', '', 12)
+    except Exception as e:
+        st.error("无法加载字体，请确保 `simhei.ttf` 放在代码同级目录下。")
+        return None
+
+    # 🟢 支持文字颜色设置的安全打印函数
+    def safe_print(text, max_len=45, line_height=7, r=0, g=0, b=0):
+        pdf.set_text_color(r, g, b)
+        lines = str(text).split('\n')
+        for line in lines:
+            line = line.strip()
+            while len(line) > max_len:
+                split_idx = max_len
+                # 避免标点符号出现在行首
+                if split_idx < len(line) and line[split_idx] in ['，', '。', '、', '；', '：', ',', '.', '”', '）', '】']:
+                    split_idx += 1
+
+                pdf.cell(0, line_height, line[:split_idx], ln=True)
+                line = line[split_idx:]
+            if line:
+                pdf.cell(0, line_height, line, ln=True)
+
+    # 1. 报告主标题 (深蓝色)
+    pdf.set_text_color(0, 51, 102)
+    pdf.set_font('Hei', '', 20)
+    pdf.cell(0, 12, f"专利查重分析报告: {project_name.split('.')[1].strip()}", ln=True, align='C')
+    pdf.ln(2)
+
+    # 2. 统计汇总区域 (带浅蓝色背景块)
+    pdf.set_font('Hei', '', 11)
+    global_keys_str = '、'.join(global_keys)
+    pdf.set_fill_color(240, 248, 255)  # 浅蓝色 AliceBlue 背景
+    pdf.set_text_color(0, 51, 102)
+    pdf.multi_cell(0, 8, f"【同行专利底层逻辑焦点】\n {global_keys_str}", fill=True, border=0)
+    pdf.ln(2)
+
+    pdf.set_text_color(50, 50, 50)
+    pdf.cell(0, 8, f"比对总数: {len(df_result)} 篇   |   高风险: {high_risk} 篇   |   中风险: {mid_risk} 篇", ln=True)
+    pdf.ln(2)
+
+    # 3. 科技感深蓝色主分割线
+    pdf.set_draw_color(0, 51, 102)
+    pdf.set_line_width(0.6)
+    pdf.cell(0, 0, "", border='T', ln=True)
+    pdf.set_line_width(0.2) # 恢复线条默认宽度
+    pdf.ln(6)
+
+    # 4. 提取风险专利，按不同颜色进行层级排版
+    risky_df = df_result[df_result['风险评级'].isin(['🔴 高风险', '🟠 中风险'])]
+    abstract_col_name = [c for c in df_result.columns if '摘要' in c][0]
+    title_name = [c for c in df_result.columns if '名称' in c][0]
+    applicant_name = [c for c in df_result.columns if '申请' in c and '人' in c][0]
+
+    if risky_df.empty:
+        pdf.set_font('Hei', '', 14)
+        safe_print("✅ 结论：当前草稿具备极高新颖性，未发现高/中度撞车风险！", r=34, g=139, b=34) # 森林绿
+    else:
+        pdf.set_font('Hei', '', 14)
+        safe_print("【重点预警专利清单】", line_height=10, r=0, g=51, b=102)
+        pdf.ln(2)
+
+        pdf.set_font('Hei', '', 11)
+
+        for index, row in risky_df.iterrows():
+            sim_score = float(row['与设想相似度(%)'])
+
+            # 去除原数据中的 Emoji 图标，避免 PDF 乱码，纯用颜色区分
+            is_high_risk = '高' in row['风险评级']
+            risk_label = "【高风险】" if is_high_risk else "【中风险】"
+            r_val, g_val, b_val = (220, 20, 60) if is_high_risk else (255, 140, 0) # 红 or 橙
+
+            # 字段排版与上色
+            safe_print(f"{risk_label} 核心逻辑相似度：{sim_score:.2f}%", r=r_val, g=g_val, b=b_val)
+            safe_print(f"名  称：{row[title_name]}", r=0, g=0, b=0)                 # 纯黑
+            safe_print(f"申 请 人：{row[applicant_name]}", r=120, g=120, b=120)       # 灰色
+            safe_print(f"技术侧重点：{row['本篇技术侧重点']}", r=46, g=139, b=87)        # 墨绿
+            safe_print(f"摘  要：{row[abstract_col_name]}", r=40, g=40, b=40)       # 深灰
+
+            pdf.ln(3)
+            # 专利之间用极浅的灰色细线分隔
+            pdf.set_draw_color(225, 225, 225)
+            pdf.cell(0, 0, "", border='T', ln=True)
+            pdf.ln(4)
+
+    return bytes(pdf.output())
+
+# ==========================================
+# 5. 网页交互界面
 # ==========================================
 st.sidebar.header("📂 专利项目切换")
 
-# 项目名称与对应数据文件夹的映射字典
 project_map = {
     "1. 暴雨内涝水尺检测": "专利分析_水尺识别",
     "2. 寻物时间快速回溯": "专利分析_寻物溯源",
     "3. 摄像头开门状态与角度检测": "专利分析_开门角度",
-    "4. 盲道场景划分与目标识别优化": "专利分析_盲道识别"
+    "4. 街道场景划分与目标识别优化": "专利分析_盲道识别"
 }
 
 project = st.sidebar.selectbox("请选择当前要分析的专利：", list(project_map.keys()))
 current_folder = project_map[project]
 
-# 针对不同课题加载高壁垒草稿
 if project == "1. 暴雨内涝水尺检测":
     default_concept = "一种面向复杂视角与遮挡环境的城市内涝水尺识别方法。"
 elif project == "2. 寻物时间快速回溯":
@@ -96,7 +190,7 @@ elif project == "2. 寻物时间快速回溯":
 elif project == "3. 摄像头开门状态与角度检测":
     default_concept = "一种多角度监控的房门开启状态与转动角度动态检测方法。"
 else:
-    default_concept = "一种基于轻量化语义分割小模型的街区场景动态划分与目标识别精度提升方法。系统以城市地面铺设的盲道与导盲带作为核心几何参照物和空间拓扑分界线，通过在边缘计算设备部署轻量化特征提取网络，对街区监控图像进行实时像素级分割；自动将画面精准划分为人行道区域、机动车道区域与商家店外经营区域；进而根据不同区域设置动态掩膜与置信度权重，有效过滤非目标区域的背景噪音干扰，从而实现特定场景下目标检测精度的显著提升。"
+    default_concept = "一种基于图像分割，再根据检测出来的杂物坐标算出来他是占道经营、店外经营、还是流动商贩方法。"
 
 st.sidebar.header("📝 录入与修改设想")
 st.sidebar.info(f"系统已切换至【{project}】")
@@ -114,7 +208,7 @@ if st.sidebar.button(f"🚀 查重: {project.split('.')[1]}"):
             st.info(f"**同行专利的底层逻辑焦点：** { ' 、 '.join(global_keys) }")
 
             st.markdown("---")
-            st.markdown(f"### 📑 比对清单 ({current_folder})")
+            st.markdown(f"### 📑 比堪清单 ({current_folder})")
 
             high_risk = len(df_result[df_result['风险评级'] == '🔴 高风险'])
             mid_risk = len(df_result[df_result['风险评级'] == '🟠 中风险'])
@@ -127,6 +221,22 @@ if st.sidebar.button(f"🚀 查重: {project.split('.')[1]}"):
             abstract_col_name = [c for c in df_result.columns if '摘要' in c][0]
             st.dataframe(df_result.drop(columns=[abstract_col_name]), use_container_width=True, height=350)
 
+            # ==========================================
+            # 生成并展示 PDF 下载按钮
+            # ==========================================
+            st.markdown("---")
+            col_btn, _ = st.columns([1, 2])
+            with col_btn:
+                pdf_bytes = generate_pdf_report(project, global_keys, df_result, high_risk, mid_risk)
+                if pdf_bytes:
+                    st.download_button(
+                        label="📄 一键导出分析报告 (PDF)",
+                        data=pdf_bytes,
+                        file_name=f"{project.split('.')[1].strip()}_专利查重报告.pdf",
+                        mime="application/pdf"
+                    )
+                else:
+                    st.warning("⚠️ 若需下载PDF报告，请将 `simhei.ttf` 字体文件放置在代码同一目录下。")
             st.markdown("---")
 
             risky_df = df_result[df_result['风险评级'].isin(['🔴 高风险', '🟠 中风险'])]
